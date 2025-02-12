@@ -2,7 +2,7 @@ name: AI Tweet Bot
 
 on:
   schedule:
-    - cron: '0 */12 * * *'  # Run every 12 hours to stay within rate limits
+    - cron: '0 */3 * * *'  # Run every 3 hours to stay within rate limits
   workflow_dispatch:       # Allows manual triggering for testing
 
 jobs:
