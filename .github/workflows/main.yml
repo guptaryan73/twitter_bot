@@ -1,0 +1,93 @@
+name: Random Daily Tweet Bot
+on:
+  schedule:
+    - cron: '0 * * * *'  # Trigger every hour on the hour
+
+jobs:
+  tweet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code with full history
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Fetch full history to allow committing changes
+
+      - name: Generate or retrieve random tweet time
+        id: generate_time
+        run: |
+          random_time_file="random_tweet_time.txt"
+          current_date=$(date +'%Y-%m-%d')
+          current_hour=$(date +'%H')
+
+          # Check if today's random time is already set
+          if [ -s "$random_time_file" ]; then
+              stored_date=$(grep "date:" $random_time_file | awk '{print $2}')
+              stored_hour=$(grep "hour:" $random_time_file | awk '{print $2}')
+              if [ "$stored_date" == "$current_date" ]; then
+                  echo "Found stored time: $stored_hour:00"
+              else
+                  # Generate new random time
+                  random_hour=$(( ( RANDOM % 22 ) + 1 ))  # 1-22 (1 AM to 11 PM)
+                  # Ensure random hour is not the current hour to avoid immediate tweeting
+                  while [ "$random_hour" -eq $current_hour ]; do
+                      random_hour=$(( ( RANDOM % 22 ) + 1 ))
+                  done
+                  echo "date: $current_date" > $random_time_file
+                  echo "hour: $random_hour" >> $random_time_file
+                  # Commit the file to persist the random time
+                  git config --local user.email "action@github.com"
+                  git config --local user.name "GitHub Action"
+                  git add $random_time_file
+                  git commit -m "Update random tweet time for $current_date" || true
+                  git push || true
+                  echo "Generated new time: $random_hour:00"
+              fi
+          else
+              # Generate new random time
+              random_hour=$(( ( RANDOM % 22 ) + 1 ))  # 1-22 (1 AM to 11 PM)
+              # Ensure random hour is not the current hour
+              while [ "$random_hour" -eq $current_hour ]; do
+                  random_hour=$(( ( RANDOM % 22 ) + 1 ))
+              done
+              echo "date: $current_date" > $random_time_file
+              echo "hour: $random_hour" >> $random_time_file
+              # Commit the file to persist the random time
+              git add $random_time_file
+              git commit -m "Initial random tweet time for $current_date" || true
+              git push || true
+              echo "Generated new time: $random_hour:00"
+          fi
+
+          # Output the stored hour for subsequent steps
+          stored_hour=$(grep "hour:" $random_time_file | awk '{print $2}')
+          echo "stored_hour=$stored_hour" >> $GITHUB_OUTPUT
+
+      - name: Check if current hour matches random hour
+        id: check_time
+        run: |
+          current_hour=$(date +'%H')
+          echo "Current hour: $current_hour"
+          echo "Random hour: ${{ steps.generate_time.outputs.stored_hour }}"
+          if [ "$current_hour" == "${{ steps.generate_time.outputs.stored_hour }}" ]; then
+              echo "time_matched=true" >> $GITHUB_OUTPUT
+          else
+              echo "time_matched=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Tweet Bot
+        if: steps.check_time.outputs.time_matched == 'true'
+        env:
+          TWITTER_API_KEY: ${{ secrets.TWITTER_API_KEY }}
+          TWITTER_API_SECRET: ${{ secrets.TWITTER_API_SECRET }}
+          TWITTER_ACCESS_TOKEN: ${{ secrets.TWITTER_ACCESS_TOKEN }}
+          TWITTER_ACCESS_SECRET: ${{ secrets.TWITTER_ACCESS_SECRET }}
+          HUGGINGFACE_API_TOKEN: ${{ secrets.HUGGINGFACE_API_TOKEN }}
+        run: python tweet_bot.py
+
+      # Clean up after tweeting to reset for next day
+      - name: Clean up random time file
+        if: steps.check_time.outputs.time_matched == 'true'
+        run: |
+          git rm random_tweet_time.txt
+          git commit -m "Clean up after tweet"
+          git push || true
