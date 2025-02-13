@@ -26,14 +26,13 @@ load_dotenv()
 class BotConfig:
     MODEL_ENDPOINTS = [
         "HuggingFaceH4/zephyr-7b-beta",
-        "mistralai/Mixtral-8x7B-Instruct-v0.1",
-
+        "mistralai/Mixtral-8x7B-Instruct-v0.1"
     ]
 
     FALLBACK_TWEETS = [
         "🌍 {trend} matters! Join the discussion. #{trend_clean}",
-        "💡 What's your take on {trend}? Let's talk. #{trend_clean}",
-        "🤝 Align with {trend} advocates. Share your view. #{trend_clean}"
+        "💡 Share your thoughts on {trend}. #{trend_clean}",
+        "🤝 Let’s talk {trend}! #{trend_clean}"
     ]
 
     REQUIRED_VARS = [
@@ -45,14 +44,26 @@ class BotConfig:
     CONTENT_SAFETY = {
         "banned_phrases": [
             "blown away", "breaking news", "exposed", "leaked",
-            "🚨", "😱", "💣", "🔥", "🚨", "💥", "ViralForChange",
+            "factoryBuilder", "ViralForChange",
             "Join me", "Check out", "Purchase", "Click here",
-            "The tweet starts with"
+            "The tweet starts with", "Generate a tweet",
+            "Write a tweet", "Example", "Test", 
+            "Question", "To craft", "Did you know",
+            "Remember to", "Avoid", "Keep it", "Use", 
+            "Write", "Tip", "Fact", "Resource",
+            "in order to", "please note", "ensure that",
+            "focus on", "emphasize", "highlight", "strive for",
+            "create a", "craft a", "compose a", "put together",
+            "Dont miss", "subscribe", "Watch out",
+            "Your post should", "Heres an", "alternative version",
+            "similarly", "likewise", "conversely", "however",
+            "moreover", "furthermore", "nevertheless",
+            "in addition", "additionally", "further"
         ],
-        "allowed_emojis": ["📊", "🔍", "💡", "🌍", "💬", "🌟", "🚀"]
+        "allowed_emojis": ["📊", "🔍", "💡", "🌍", "💬", "🌟", "🚀"],
+        "call_to_action": ["Let’s", "Join", "Share", "Act now", "Discuss"]
     }
 
-    RATE_LIMIT_BACKOFF = 300  # 5 minutes
     MAX_RETRIES = 5
 
 class TwitterClient:
@@ -79,30 +90,23 @@ class TwitterClient:
             logging.critical(f"Twitter client initialization failed: {e}")
             raise SystemExit(1)
 
-    def post_tweet(self, text: str):
-        attempt = 0
-        while attempt < BotConfig.MAX_RETRIES:
+    def post_tweet(self, text: str) -> None:
+        for attempt in range(BotConfig.MAX_RETRIES):
             try:
                 response = self.client.create_tweet(text=text)
                 logging.info(f"Tweet posted: {response.data['id']}")
                 return
             except tweepy.TooManyRequests as e:
-                self._handle_rate_limit(e, attempt)
+                reset_time = int(e.response.headers.get('x-rate-limit-reset', time.time() + 300))
+                wait = max(reset_time - time.time(), 0)
+                logging.warning(f"Rate limit hit; waiting {wait:.1f}s...")
+                time.sleep(wait)
             except tweepy.Forbidden as e:
                 logging.error(f"Content policy violation: {e.api_errors}")
                 return
             except Exception as e:
                 logging.error(f"Tweet failed (attempt {attempt+1}): {str(e)[:100]}")
-                return
-            finally:
-                attempt += 1
-
-    def _handle_rate_limit(self, error, attempt):
-        reset = int(error.response.headers.get('x-rate-limit-reset', time.time() + 300))
-        wait = max(reset - int(time.time()), 0)
-        logging.warning(f"Rate limit hit (attempt {attempt+1}/{BotConfig.MAX_RETRIES}). "
-                        f"Backing off for {wait}s...")
-        time.sleep(wait)
+                time.sleep(2 ** attempt)
 
 class ContentGenerator:
     def __init__(self):
@@ -122,45 +126,53 @@ class ContentGenerator:
             "inputs": prompt,
             "parameters": {
                 "max_new_tokens": 100,
-                "temperature": 0.7,
+                "temperature": 0.8,
                 "top_p": 0.9,
-                "repetition_penalty": 1.2,
+                "repetition_penalty": 1.5,
                 "return_full_text": False
             }
         }
 
-        for model in random.sample(BotConfig.MODEL_ENDPOINTS, len(BotConfig.MODEL_ENDPOINTS)):
+        for model in BotConfig.MODEL_ENDPOINTS:
             try:
                 response = requests.post(
                     f"https://api-inference.huggingface.co/models/{model}",
                     headers=headers,
                     json=data,
-                    timeout=20
+                    timeout=30
                 )
-                if response.status_code == 403:
-                    logging.error(f"Access denied to model {model}. Skipping.")
-                    continue
                 response.raise_for_status()
-                result = response.json()
-                return result[0].get("generated_text", "").strip()
+                return self._extract_generated_text(response.json(), prompt)
             except requests.exceptions.RequestException as e:
-                logging.error(f"Model {model[:15]}... failed: {str(e)[:100]}")
+                logging.error(f"Request error for {model}: {str(e)[:100]}")
             except Exception as e:
                 logging.error(f"Unexpected error with {model}: {str(e)[:100]}")
-        
         return None
+
+    def _extract_generated_text(self, response, prompt: str) -> Optional[str]:
+        try:
+            generated = response[0]["generated_text"].strip()
+            # Remove the prompt from the generated text if it appears
+            if generated.startswith(prompt):
+                generated = generated[len(prompt):].strip()
+            return generated
+        except (KeyError, IndexError):
+            logging.error(f"Invalid model response: {response}")
+            return None
 
 class TrendAnalyzer:
     @staticmethod
-    def get_trends(country: str = 'united_states') -> List[str]:  
+    def get_trends() -> List[str]:
         try:
-            pytrends = TrendReq(hl='en-US', tz=360)
-            df = pytrends.trending_searches(pn=country)
-            trends = [
-                t for t in df[0].tolist()
-                if len(t) > 4 and not t.isdigit() and t.isalpha()
-            ]
-            return trends[:5] if trends else ["AI", "Climate", "Healthcare"]
+            pytrends = TrendReq(hl='en-US', tz=360, geo='US')
+            trends_df = pytrends.trending_searches()
+            if trends_df.empty:
+                return ["AI", "Climate", "Healthcare"]
+            trends = trends_df['title'].tolist() if 'title' in trends_df.columns else trends_df.iloc[:, 0].tolist()
+            return [
+                t.strip() for t in trends 
+                if len(t.strip()) > 4 and not t.strip().isdigit()
+            ][:5] or ["AI", "Climate", "Healthcare"]
         except Exception as e:
             logging.error(f"Trend retrieval failed: {e}")
             return ["AI", "Climate", "Healthcare"]
@@ -168,44 +180,19 @@ class TrendAnalyzer:
 class ContentFormatter:
     @staticmethod
     def format_tweet(raw_text: str, trend: str) -> str:
-        current_year = datetime.now().year
-        clean_text = raw_text.replace("\n", " ").replace('"', '').strip()
-        
-        # Remove meta-text and unwanted phrases
-        clean_text = re.sub(r'^The tweet starts with.*?\.\s*', '', clean_text, flags=re.IGNORECASE)
-        for phrase in BotConfig.CONTENT_SAFETY["banned_phrases"]:
-            clean_text = clean_text.replace(phrase, "")
-        
-        # URL removal (including pic.twitter.com)
-        clean_text = re.sub(r'(https?://\S+|pic\.twitter\.com/\S+)', '', clean_text)
-        
-        # Year normalization
-        clean_text = re.sub(r'\b(20\d{2})\b', str(current_year), clean_text)
-        
-        # Extract existing hashtags (and remove them)
-        existing_tags = [word for word in clean_text.split() if word.startswith("#")]
-        clean_text = re.sub(r'(\s+)(#(\w+))', '', clean_text)
-        
-        # Trend hashtags
-        trend_clean = trend.replace(" ", "")
-        hashtags = [f"#{trend_clean}", f"#{trend_clean}{current_year}"]
-        
-        # Merge and deduplicate hashtags (max 3)
-        all_tags = hashtags + existing_tags
-        all_tags = list(dict.fromkeys(all_tags))[:3]
-        
-        # Assemble final text with hashtags
-        clean_text += " " + " ".join(all_tags)
-        
-        # Emoji safety & length enforcement
-        clean_text = ''.join(
-            c for c in clean_text 
-            if c in BotConfig.CONTENT_SAFETY["allowed_emojis"] or c.isalnum() or c in ' #'
-        )
-        if len(clean_text) > 280:
-            clean_text = clean_text[:250].rsplit(' ', 1)[0] + "…"
-        
-        return clean_text.strip()
+        # Use the generated text directly as tweet content
+        tweet = raw_text.strip()
+
+        # If the tweet doesn't mention the trend, append a hashtag for it
+        if trend.lower() not in tweet.lower():
+            trend_clean = re.sub(r'\W+', '', trend).strip()
+            hashtag = f" #{trend} #{trend_clean}{datetime.now().year}"
+            tweet += hashtag
+
+        # Ensure tweet length does not exceed Twitter's limit
+        if len(tweet) > 280:
+            tweet = tweet[:280].rsplit(' ', 1)[0] + "..."
+        return tweet if len(tweet) > 10 else "No viable content generated"
 
 def main():
     try:
@@ -214,34 +201,31 @@ def main():
         trends = TrendAnalyzer.get_trends()
         selected_trend = random.choice(trends)
         logging.info(f"Selected trend: {selected_trend}")
-        
-        # Improved prompt to avoid meta-responses
+
         prompt = (
-            f"Write a tweet about '{selected_trend}' that starts with a bold question, "
-            "includes 1-2 relevant hashtags, and ends with a call to engage. "
-            "Keep it concise (under 200 characters)."
+            f"Write a human-like tweet about {selected_trend} that sparks curiosity and engagement. "
+            "Ensure the tweet is under 280 characters. Only output the tweet text, without any instructions or additional text. 🌟"
         )
-        
+
         raw_content = generator.generate(prompt)
         if not raw_content:
             logging.warning("Content generation failed. Using fallback.")
-            trend_clean = selected_trend.replace(" ", "")
+            trend_clean = re.sub(r'\W+', '', selected_trend)
             fallback = random.choice(BotConfig.FALLBACK_TWEETS).format(
                 trend=selected_trend,
                 trend_clean=trend_clean
             )
             client.post_tweet(fallback)
-            return
-        
-        tweet_text = ContentFormatter.format_tweet(raw_content, selected_trend)
-        logging.info(f"Final tweet: {tweet_text}")
-        client.post_tweet(tweet_text)
+        else:
+            tweet_text = ContentFormatter.format_tweet(raw_content, selected_trend)
+            logging.info(f"Final tweet: {tweet_text}")
+            client.post_tweet(tweet_text)
         
     except KeyboardInterrupt:
         logging.info("Bot interrupted by user. Exiting...")
         sys.exit(0)
     except Exception as e:
-        logging.critical(f"Critical failure: {str(e)[:100]}")
+        logging.critical(f"Critical failure: {str(e)}")
         sys.exit(1)
 
 if __name__ == "__main__":
