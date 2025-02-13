@@ -27,7 +27,7 @@ class BotConfig:
     MODEL_ENDPOINTS = [
         "HuggingFaceH4/zephyr-7b-beta",
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
-        "google/gemma-7b-it"
+
     ]
 
     FALLBACK_TWEETS = [
